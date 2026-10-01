@@ -52,6 +52,61 @@ Grant access to every `hidraw` node for each product. Chromium opens the HID
 device before OpenMouse selects its vendor configuration collection, so access
 to only the `0xff02:0x0002` collection's node is insufficient.
 
+### Linux: rapid double-clicks filtered at 0 ms
+
+OpenMouse's debounce control changes the mouse's firmware setting. Linux's
+[libinput button filter](https://wayland.freedesktop.org/libinput/doc/latest/button-debouncing.html)
+can still merge rapid press/release pairs afterward. On the tested Endorfy LIV
+Plus Wireless receiver, 26 raw presses became 14 browser presses with firmware
+debounce set to 0 ms. The interval between presses does not measure firmware
+debounce latency.
+
+To pass these clicks through, use libinput **1.30 or newer**, built with
+[Lua plugin support](https://wayland.freedesktop.org/libinput/doc/latest/lua-plugins.html),
+and a compositor that loads plugins. The local KDE Wayland setup uses KWin
+6.7.5 and libinput 1.32.0; its KWin build loads plugins from the default paths
+unless `KWIN_LIBINPUT_NO_PLUGINS=1`. Other desktop environments may not load
+them. This procedure has not yet been verified after a desktop restart.
+
+1. Set **Debounce time** to **0 ms** in OpenMouse.
+2. Create a plugin that disables only libinput's button filter for the
+   `3299:00a7` USB receiver's mouse interface:
+
+   ```bash
+   sudo install -d -m 755 /etc/libinput/plugins
+   sudo tee /etc/libinput/plugins/10-endorfy-liv-plus-no-debounce.lua >/dev/null <<'LUA'
+   libinput:register({1})
+
+   libinput:connect("new-evdev-device", function(device)
+       local info = device:info()
+       local usages = device:usages()
+       if info.bustype == evdev.BUS_USB
+           and info.vid == 0x3299 and info.pid == 0x00a7
+           and usages[evdev.BTN_LEFT]
+           and usages[evdev.REL_X] and usages[evdev.REL_Y] then
+           device:disable_feature("button-debouncing")
+           libinput:log_info("Endorfy LIV Plus Wireless: disabled button debouncing")
+       end
+   end)
+   LUA
+   sudo chmod 644 /etc/libinput/plugins/10-endorfy-liv-plus-no-debounce.lua
+   ```
+
+3. Save your work, **log out and back in**, then reconnect the receiver and
+   repeat your click test. Reloading udev rules alone does not reload plugins.
+   Compare individual button presses, rather than the browser's `dblclick`
+   event, which also depends on desktop double-click settings. If nothing
+   changes, check whether your compositor loads plugins and its logs for Lua
+   errors; installing a plugin does not enable unsupported compositors.
+
+Removing this filter also passes through unwanted switch bounce. Raise the
+mouse's firmware debounce if ordinary clicks start registering twice. To undo
+the Linux override, remove the file and log out and back in again:
+
+```bash
+sudo rm /etc/libinput/plugins/10-endorfy-liv-plus-no-debounce.lua
+```
+
 ## Contributing
 
 OpenMouse is one repository in a family — with the **Desktop** app,
