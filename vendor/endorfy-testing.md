@@ -52,12 +52,49 @@ then confirmed on the real receiver. The driver validates the scalar checksum,
 refuses values outside 0–20 ms before I/O, and reads back each write before
 reporting success. It does not rewrite neighboring motion-sync settings.
 
-## Hardware results
+## RGB light-strip evidence
+
+The official software archive linked above was inspected without running its
+installer. `0-English.xml` defines effect codes 0–6: off, rainbow moving,
+single-color breathing, single-color static, neon, rainbow breathing, and
+multicolor static. The app enables color selection only for codes 2 and 3,
+and speed selection for codes 1, 2, 4, and 5.
+
+The embedded `HIDUsb.dll` light-strip parser reads nine bytes at `0xa0`.
+They contain `[mode, red, green, blue, speedIndex, brightnessIndex, checksum,
+enabled, enableChecksum]`. The first seven bytes sum to `0x55` modulo 256;
+the last two have their own `0x55` scalar checksum. The vendor writer sends
+seven bytes at `0xa0` and two bytes at `0xa7`, without touching debounce at
+`0xa9`. The official brightness and speed sliders use indexes 0–9 and show
+levels 1–10. OpenMouse exposes these as 10–100% brightness and speed 1–10.
+These are discrete firmware levels, not calibrated light-output percentages.
+
+A real receiver read on 2026-10-01 returned:
+
+```text
+08 08 00 00 a0 09 03 ff 00 00 07 00 4c 01 54 00 f2
+```
+
+This decodes to enabled static red, speed 8 and brightness level 1 (10%).
+The generic Lighting panel uses the driver-provided `Light strip` zone and
+reports hardware reads. Effect code 6 is named `Multicolor static`, separate
+from the cycling `Spectrum` effect. This controls the mouse's light strip;
+the DPI indicator and charging dock are not exposed as RGB zones.
+
+The production client was tested through a hidraw adapter. All seven effects
+were written and read back, followed by static green (50%, speed 1), static
+blue (100%, speed 10), and single-color breathing `#123456` (10%, speed 4).
+Each case preserved 1600 DPI, 1000 Hz polling and 0 ms debounce. The original
+nine RGB bytes were restored exactly and confirmed again after close/open.
+This verifies settings transport and firmware retention, not the visual
+appearance of effects or persistence across a mouse power cycle.
+
+## DPI, polling and debounce hardware results
 
 The production Endorfy client was exercised through a thin Python hidraw
-adapter implementing the same report calls as WebHID. Actual write commands
-were limited to polling bytes at offset 0, the active DPI record at 12,
-and the debounce scalar/checksum pair at offset `0xa9`.
+adapter implementing the same report calls as WebHID. In these earlier checks,
+write commands were limited to polling bytes at offset 0, the active DPI record
+at 12, and the debounce scalar/checksum pair at offset `0xa9`.
 
 - DPI writes: 500, 800, 1600; every value read back correctly.
 - Polling writes: 125, 250, 500, 1000 Hz; every value read back correctly.
@@ -70,18 +107,19 @@ and the debounce scalar/checksum pair at offset `0xa9`.
 The shared stage editing and active-stage selection have automated transport
 coverage; selecting a different enabled stage has not been tested on this
 unit, which currently has only one enabled stage. Stage-count changes,
-RGB, button remapping, profiles, processing, and firmware updates are not
+button remapping, profiles, processing, and firmware updates are not
 exposed. No persistence across a power cycle or browser/Bridge transport
 claim is made by the hidraw tests.
 
 ## Remaining manual checks
 
 1. Connect through Chromium's picker or OpenMouse Bridge and verify the single
-   receiver card, name, battery, firmware, DPI, polling rate and debounce.
-2. Change DPI, polling rate and debounce through the UI, read back, and restore settings.
+   receiver card, name, battery, firmware, DPI, polling rate, debounce and Lighting.
+2. Change DPI, polling rate, debounce and RGB through the UI, read back, and restore settings.
 3. Exercise sleep/wake and reconnect behavior.
 4. Validate other enabled DPI stages when present, including the upper DPI range.
 5. Test persistence after powering the mouse off and on.
+6. Visually confirm RGB effects, brightness and speed on the mouse light strip.
 
 For Linux WebHID, grant access to all hidraw nodes of this product, then
 reload udev rules and unplug/reconnect the receiver:
