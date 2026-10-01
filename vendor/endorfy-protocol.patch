@@ -12,10 +12,10 @@ index 0074b69..12317ef 100644
  | Fantech | `@openmouse/protocol/fantech` |
 diff --git a/docs/endorfy-testing.md b/docs/endorfy-testing.md
 new file mode 100644
-index 0000000..773c9fd
+index 0000000..3c35de2
 --- /dev/null
 +++ b/docs/endorfy-testing.md
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,129 @@
 +# Endorfy LIV Plus Wireless (EY6A016)
 +
 +Hardware exercised on 2026-10-01: `3299:00a7`, product string
@@ -70,12 +70,49 @@ index 0000000..773c9fd
 +refuses values outside 0–20 ms before I/O, and reads back each write before
 +reporting success. It does not rewrite neighboring motion-sync settings.
 +
-+## Hardware results
++## RGB light-strip evidence
++
++The official software archive linked above was inspected without running its
++installer. `0-English.xml` defines effect codes 0–6: off, rainbow moving,
++single-color breathing, single-color static, neon, rainbow breathing, and
++multicolor static. The app enables color selection only for codes 2 and 3,
++and speed selection for codes 1, 2, 4, and 5.
++
++The embedded `HIDUsb.dll` light-strip parser reads nine bytes at `0xa0`.
++They contain `[mode, red, green, blue, speedIndex, brightnessIndex, checksum,
++enabled, enableChecksum]`. The first seven bytes sum to `0x55` modulo 256;
++the last two have their own `0x55` scalar checksum. The vendor writer sends
++seven bytes at `0xa0` and two bytes at `0xa7`, without touching debounce at
++`0xa9`. The official brightness and speed sliders use indexes 0–9 and show
++levels 1–10. OpenMouse exposes these as 10–100% brightness and speed 1–10.
++These are discrete firmware levels, not calibrated light-output percentages.
++
++A real receiver read on 2026-10-01 returned:
++
++```text
++08 08 00 00 a0 09 03 ff 00 00 07 00 4c 01 54 00 f2
++```
++
++This decodes to enabled static red, speed 8 and brightness level 1 (10%).
++The generic Lighting panel uses the driver-provided `Light strip` zone and
++reports hardware reads. Effect code 6 is named `Multicolor static`, separate
++from the cycling `Spectrum` effect. This controls the mouse's light strip;
++the DPI indicator and charging dock are not exposed as RGB zones.
++
++The production client was tested through a hidraw adapter. All seven effects
++were written and read back, followed by static green (50%, speed 1), static
++blue (100%, speed 10), and single-color breathing `#123456` (10%, speed 4).
++Each case preserved 1600 DPI, 1000 Hz polling and 0 ms debounce. The original
++nine RGB bytes were restored exactly and confirmed again after close/open.
++This verifies settings transport and firmware retention, not the visual
++appearance of effects or persistence across a mouse power cycle.
++
++## DPI, polling and debounce hardware results
 +
 +The production Endorfy client was exercised through a thin Python hidraw
-+adapter implementing the same report calls as WebHID. Actual write commands
-+were limited to polling bytes at offset 0, the active DPI record at 12,
-+and the debounce scalar/checksum pair at offset `0xa9`.
++adapter implementing the same report calls as WebHID. In these earlier checks,
++write commands were limited to polling bytes at offset 0, the active DPI record
++at 12, and the debounce scalar/checksum pair at offset `0xa9`.
 +
 +- DPI writes: 500, 800, 1600; every value read back correctly.
 +- Polling writes: 125, 250, 500, 1000 Hz; every value read back correctly.
@@ -88,18 +125,19 @@ index 0000000..773c9fd
 +The shared stage editing and active-stage selection have automated transport
 +coverage; selecting a different enabled stage has not been tested on this
 +unit, which currently has only one enabled stage. Stage-count changes,
-+RGB, button remapping, profiles, processing, and firmware updates are not
++button remapping, profiles, processing, and firmware updates are not
 +exposed. No persistence across a power cycle or browser/Bridge transport
 +claim is made by the hidraw tests.
 +
 +## Remaining manual checks
 +
 +1. Connect through Chromium's picker or OpenMouse Bridge and verify the single
-+   receiver card, name, battery, firmware, DPI, polling rate and debounce.
-+2. Change DPI, polling rate and debounce through the UI, read back, and restore settings.
++   receiver card, name, battery, firmware, DPI, polling rate, debounce and Lighting.
++2. Change DPI, polling rate, debounce and RGB through the UI, read back, and restore settings.
 +3. Exercise sleep/wake and reconnect behavior.
 +4. Validate other enabled DPI stages when present, including the upper DPI range.
 +5. Test persistence after powering the mouse off and on.
++6. Visually confirm RGB effects, brightness and speed on the mouse light strip.
 +
 +For Linux WebHID, grant access to all hidraw nodes of this product, then
 +reload udev rules and unplug/reconnect the receiver:
@@ -124,10 +162,10 @@ index eec295d..fa06cc2 100644
        "import": "./dist/index.js"
 diff --git a/src/drivers/endorfy/hid.test.ts b/src/drivers/endorfy/hid.test.ts
 new file mode 100644
-index 0000000..e5c6aa1
+index 0000000..3b8a90c
 --- /dev/null
 +++ b/src/drivers/endorfy/hid.test.ts
-@@ -0,0 +1,279 @@
+@@ -0,0 +1,354 @@
 +import assert from "node:assert/strict";
 +import test from "node:test";
 +import { createSupportedClient, deviceBrand, DEVICE_DRIVERS } from "../registry.ts";
@@ -141,6 +179,7 @@ index 0000000..e5c6aa1
 +  const flash = new Uint8Array(0x100);
 +  flash.set(capturedFlash);
 +  flash.set([0, 85], 0xa9);
++  flash.set([3,255,0,0,7,0,76,1,84], 0xa0);
 +  if (options.corruptField) flash[1] = 0;
 +  const target = new EventTarget();
 +  const sent: number[][] = [];
@@ -407,17 +446,92 @@ index 0000000..e5c6aa1
 +    finally { await c.close(); }
 +  }
 +});
++
++
++test("publishes the captured light strip to the shared Lighting panel", async () => {
++  const c = client(receiver().device);
++  try {
++    const lighting = (await c.readStatus()).lighting;
++    assert.ok(lighting);
++    assert.equal(lighting.zone, "Light strip");
++    assert.equal(lighting.mode, "Static");
++    assert.equal(lighting.color, "#ff0000");
++    assert.equal(lighting.speed, 8);
++    assert.equal(lighting.brightness, 10);
++    assert.deepEqual(lighting.brightnessLevels, [10,20,30,40,50,60,70,80,90,100]);
++    assert.deepEqual(lighting.speeds, [1,2,3,4,5,6,7,8,9,10]);
++    assert.deepEqual(lighting.modes, ["Off","Wave","Breathing single","Static","Neon","Breathing Loop","Multicolor static"]);
++    assert.deepEqual(lighting.colorModes, ["Static","Breathing single"]);
++    assert.deepEqual(lighting.reactiveModes, ["Wave","Breathing single","Neon","Breathing Loop"]);
++    assert.notEqual(lighting.writeOnly, true);
++  } finally { await c.close(); }
++});
++
++test("writes RGB only inside its block and reads it back", async () => {
++  const { device, flash, sent } = receiver({ noisy:true });
++  const c = client(device) as import("./hid.ts").EndorfyLivPlusHidClient;
++  const before = flash.slice();
++  try {
++    const lighting = (await c.readStatus()).lighting!;
++    await c.setLighting({...lighting,mode:"Static",color:"#123456",speed:4,brightness:60});
++    assert.deepEqual([...flash.slice(0xa0,0xa9)], [3,18,52,86,3,5,174,1,84]);
++    assert.deepEqual(flash.slice(0,0xa0), before.slice(0,0xa0));
++    assert.deepEqual(flash.slice(0xa9), before.slice(0xa9));
++    assert.deepEqual((await c.readStatus()).lighting?.color, "#123456");
++    assert.deepEqual(sent.filter(packet=>packet[0]===7).map(packet=>[packet[2],packet[3],packet[4]]), [[0,160,7]]);
++  } finally { await c.close(); }
++});
++
++test("can disable and re-enable RGB with verified enable bytes", async () => {
++  const { device, flash } = receiver();
++  const c = client(device) as import("./hid.ts").EndorfyLivPlusHidClient;
++  try {
++    const lighting = (await c.readStatus()).lighting!;
++    await c.setLighting({...lighting,mode:"Off"});
++    assert.deepEqual([...flash.slice(0xa7,0xa9)], [0,85]);
++    assert.equal((await c.readStatus()).lighting?.mode, "Off");
++    await c.setLighting({...lighting,mode:"Breathing single"});
++    assert.deepEqual([...flash.slice(0xa7,0xa9)], [1,84]);
++    assert.equal((await c.readStatus()).lighting?.mode, "Breathing single");
++  } finally { await c.close(); }
++});
++
++test("rejects unconfirmed RGB writes and invalid requests before I/O", async () => {
++  const { device, sent } = receiver({ignoreWrites:true});
++  const c = client(device) as import("./hid.ts").EndorfyLivPlusHidClient;
++  try {
++    const lighting = (await c.readStatus()).lighting!;
++    assert.ok(lighting);
++    await assert.rejects(c.setLighting({...lighting,color:"#123456"}), /retain|kept|confirm/i);
++    for (const patch of [{zone:"Receiver"},{mode:"Spectrum"},{color:"#oops"},{brightness:55},{speed:11}]) {
++      const count = sent.length;
++      await assert.rejects(c.setLighting({...lighting,...patch} as never));
++      assert.equal(sent.length,count);
++    }
++  } finally { await c.close(); }
++});
++
++test("RGB no-op writes leave flash untouched", async () => {
++  const {device,sent} = receiver();
++  const c = client(device) as import("./hid.ts").EndorfyLivPlusHidClient;
++  try {
++    const lighting = (await c.readStatus()).lighting!;
++    await c.setLighting(lighting);
++    assert.ok(sent.every(packet=>packet[0]!==7));
++  } finally { await c.close(); }
++});
 diff --git a/src/drivers/endorfy/hid.ts b/src/drivers/endorfy/hid.ts
 new file mode 100644
-index 0000000..013d764
+index 0000000..e20b315
 --- /dev/null
 +++ b/src/drivers/endorfy/hid.ts
-@@ -0,0 +1,245 @@
-+import type { MouseStatus } from "../mouse-types.js";
+@@ -0,0 +1,277 @@
++import type { MouseLighting, MouseStatus } from "../mouse-types.js";
 +import {
 +  ENDORFY_VENDOR_ID, ENDORFY_LIV_PLUS_RECEIVER_PID, ENDORFY_REPORT_ID,
 +  ENDORFY_PACKET_LENGTH, ENDORFY_USAGE_PAGE, ENDORFY_USAGE,
 +  ENDORFY_POLLING_RATES, ENDORFY_MAX_STAGES, endorfyDecodeSettingsHeader, endorfyDecodeDpiStage,
++  ENDORFY_LIGHTING_ADDRESS, ENDORFY_LIGHTING_MODES, endorfyDecodeLighting, endorfyEncodeLighting, type EndorfyLighting,
 +} from "../../endorfy/index.js";
 +import {
 +  vgnBuildReadPayload, vgnBuildSimplePayload, vgnBuildWritePayload,
@@ -503,6 +617,7 @@ index 0000000..013d764
 +      if (firmware[4]! < 2) throw new Error("Truncated Endorfy firmware reply.");
 +      const settings = await this.settings();
 +      const debounceMs = await this.readDebounce();
++      const lighting = await this.readLighting();
 +      return {
 +        brand: "Endorfy", name: this.displayName(),
 +        batteryPercent: battery?.percent ?? null,
@@ -511,7 +626,7 @@ index 0000000..013d764
 +        dpi: settings.stages[settings.activeStage]!, dpiStages: settings.stages, activeDpiStage: settings.activeStage,
 +        pollingRateHz: settings.pollingRateHz, supportedPollingRates: this.getSupportedPollingRates(),
 +        activeProfile: null, connectionType: "Wireless", connectionDetail: "2.4 GHz receiver",
-+        liftOffDistance: null, debounceMs,
++        liftOffDistance: null, debounceMs, lighting,
 +        firmware: [`Mouse ${firmware[5]}.${firmware[6]!.toString(16).padStart(2, "0")}`],
 +        ui: {
 +          family: "endorfy-liv-plus", defaultDisplayName: this.displayName(), forceShowBattery: true,
@@ -568,6 +683,36 @@ index 0000000..013d764
 +      if (confirmed !== ms) throw new Error(`The Endorfy mouse kept ${confirmed} ms instead of ${ms} ms debounce.`);
 +      return confirmed;
 +    });
++  }
++
++  async setLighting(lighting: MouseLighting): Promise<void> {
++    if (lighting.zone !== "Light strip") throw new Error("Unsupported Endorfy lighting zone.");
++    const encoded = endorfyEncodeLighting(lighting as EndorfyLighting); // Validate before any I/O.
++    return this.transaction(async () => {
++      const current = await this.read(ENDORFY_LIGHTING_ADDRESS, 9);
++      endorfyDecodeLighting(current); // Never overwrite an unrecognized/corrupt block.
++      if (!encoded.slice(0, 7).every((byte, index) => byte === current[index])) {
++        await this.exchange(vgnBuildWritePayload(ENDORFY_LIGHTING_ADDRESS, [...encoded.slice(0, 7)]));
++      }
++      if (current[7] !== encoded[7]) {
++        await this.exchange(vgnBuildWritePayload(ENDORFY_LIGHTING_ADDRESS + 7, [...encoded.slice(7)]));
++      }
++      const confirmed = await this.read(ENDORFY_LIGHTING_ADDRESS, 9);
++      endorfyDecodeLighting(confirmed);
++      if (!encoded.every((byte, index) => byte === confirmed[index])) {
++        throw new Error("The Endorfy mouse did not confirm the lighting settings.");
++      }
++    });
++  }
++
++  private async readLighting(): Promise<MouseLighting> {
++    const lighting = endorfyDecodeLighting(await this.read(ENDORFY_LIGHTING_ADDRESS, 9));
++    return {
++      zone: "Light strip", ...lighting, modes: ENDORFY_LIGHTING_MODES,
++      color2: null, colorModes: ["Static", "Breathing single"], dualColorModes: [],
++      reactiveModes: ["Wave", "Breathing single", "Neon", "Breathing Loop"],
++      speeds: [1,2,3,4,5,6,7,8,9,10], brightnessLevels: [10,20,30,40,50,60,70,80,90,100],
++    };
 +  }
 +
 +  private async readDebounce(): Promise<number> {
@@ -685,10 +830,18 @@ index 0000000..1876b5d
 +  }
 +});
 diff --git a/src/drivers/mouse-types.ts b/src/drivers/mouse-types.ts
-index 5838179..bdcb01e 100644
+index 5838179..3ed85a3 100644
 --- a/src/drivers/mouse-types.ts
 +++ b/src/drivers/mouse-types.ts
-@@ -153,7 +153,7 @@ export interface AtkReceiverInfo {
+@@ -126,6 +126,7 @@ export type MouseLightingMode =
+   | "Breathing random"
+   | "Breathing single"
+   | "Breathing dual"
++  | "Multicolor static"
+   | "Neon"
+   | "Cycling Flash"
+   | "YOYO Ball"
+@@ -153,7 +154,7 @@ export interface AtkReceiverInfo {
  }
  
  export interface MouseStatus {
@@ -750,10 +903,10 @@ index 3969115..bf72d19 100644
    ...DAREU_HID_FILTERS,
 diff --git a/src/endorfy/index.ts b/src/endorfy/index.ts
 new file mode 100644
-index 0000000..26e9790
+index 0000000..caa7f02
 --- /dev/null
 +++ b/src/endorfy/index.ts
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,86 @@
 +/** LIV Plus Wireless EY6A016, 2.4 GHz receiver. See docs/endorfy-testing.md. */
 +import { vgnDecodeDpi, vgnDecodePollingRate, vgnUnpackScalar } from "../vgn/index.js";
 +export const ENDORFY_VENDOR_ID = 0x3299;
@@ -790,6 +943,124 @@ index 0000000..26e9790
 +  }
 +  return dpi;
 +}
++
++/** RGB light-strip block, confirmed against the vendor's HIDUsb parser. */
++export const ENDORFY_LIGHTING_ADDRESS = 0xa0;
++export const ENDORFY_LIGHTING_MODES = [
++  "Off", "Wave", "Breathing single", "Static", "Neon", "Breathing Loop", "Multicolor static",
++] as const;
++export interface EndorfyLighting {
++  mode: typeof ENDORFY_LIGHTING_MODES[number];
++  color: string;
++  speed: number;
++  brightness: number;
++}
++
++export function endorfyDecodeLighting(data: Uint8Array): EndorfyLighting {
++  if (data.length !== 9) throw new Error("Truncated Endorfy lighting settings.");
++  if ((data.slice(0, 7).reduce((sum, byte) => sum + byte, 0) & 255) !== 0x55
++    || vgnUnpackScalar(data[7]!, data[8]!) === null) {
++    throw new Error("The Endorfy mouse returned corrupt lighting settings.");
++  }
++  const mode = ENDORFY_LIGHTING_MODES[data[0]!];
++  if (!mode || data[4]! > 9 || data[5]! > 9 || data[7]! > 1) {
++    throw new Error("The Endorfy mouse returned unsupported lighting settings.");
++  }
++  return {
++    mode: data[7] === 0 ? "Off" : mode,
++    color: `#${[...data.slice(1, 4)].map(byte => byte.toString(16).padStart(2, "0")).join("")}`,
++    speed: data[4]! + 1,
++    brightness: (data[5]! + 1) * 10,
++  };
++}
++
++export function endorfyEncodeLighting(lighting: EndorfyLighting): Uint8Array {
++  const mode = ENDORFY_LIGHTING_MODES.indexOf(lighting.mode);
++  if (mode < 0) throw new Error("Unsupported Endorfy lighting effect.");
++  if (typeof lighting.color !== "string" || !/^#[0-9a-f]{6}$/i.test(lighting.color)) {
++    throw new Error("Endorfy lighting color must be #rrggbb.");
++  }
++  if (!Number.isInteger(lighting.speed) || lighting.speed < 1 || lighting.speed > 10) {
++    throw new Error("Endorfy lighting speed must be 1–10.");
++  }
++  if (!Number.isInteger(lighting.brightness) || lighting.brightness < 10
++    || lighting.brightness > 100 || lighting.brightness % 10 !== 0) {
++    throw new Error("Endorfy lighting brightness must be 10–100% in steps of 10%.");
++  }
++  const rgb = [1, 3, 5].map(offset => Number.parseInt(lighting.color.slice(offset, offset + 2), 16));
++  const data = Uint8Array.from([mode, ...rgb, lighting.speed - 1, lighting.brightness / 10 - 1, 0, mode === 0 ? 0 : 1, 0]);
++  data[6] = (0x55 - data.slice(0, 6).reduce((sum, byte) => sum + byte, 0)) & 255;
++  data[8] = 0x55 - data[7]!;
++  return data;
++}
+diff --git a/src/endorfy/lighting.test.ts b/src/endorfy/lighting.test.ts
+new file mode 100644
+index 0000000..314054e
+--- /dev/null
++++ b/src/endorfy/lighting.test.ts
+@@ -0,0 +1,62 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import * as codec from "./index.ts";
++
++// Receiver capture at flash 0xa0: red static light, speed 8, brightness level 1.
++const captured = Uint8Array.from([3,255,0,0,7,0,76,1,84]);
++
++test("decodes captured RGB settings without substituting defaults", () => {
++  assert.equal(typeof codec.endorfyDecodeLighting, "function");
++  assert.deepEqual(codec.endorfyDecodeLighting(captured), {
++    mode: "Static", color: "#ff0000", speed: 8, brightness: 10,
++  });
++});
++
++test("encodes RGB channels, level indexes and both independent checksums", () => {
++  assert.equal(typeof codec.endorfyEncodeLighting, "function");
++  assert.deepEqual([...codec.endorfyEncodeLighting({
++    mode: "Static", color: "#123456", speed: 4, brightness: 60,
++  })], [3,18,52,86,3,5,174,1,84]);
++});
++
++test("decodes every vendor effect and honors a disabled light strip", () => {
++  for (const [mode, want] of [
++    [0,"Off"], [1,"Wave"], [2,"Breathing single"], [3,"Static"],
++    [4,"Neon"], [5,"Breathing Loop"], [6,"Multicolor static"],
++  ] as const) {
++    const data = Uint8Array.from([mode,255,0,0,7,0,(0x55-mode-255-7)&255,1,84]);
++    assert.equal(codec.endorfyDecodeLighting(data).mode, want);
++  }
++  assert.equal(codec.endorfyDecodeLighting(Uint8Array.from([3,255,0,0,7,0,76,0,85])).mode, "Off");
++});
++
++test("encodes off and the brightness/speed endpoints", () => {
++  assert.deepEqual([...codec.endorfyEncodeLighting({mode:"Off",color:"#000000",speed:1,brightness:10})], [0,0,0,0,0,0,85,0,85]);
++  assert.deepEqual([...codec.endorfyEncodeLighting({mode:"Wave",color:"#ffffff",speed:10,brightness:100})], [1,255,255,255,9,9,69,1,84]);
++});
++
++test("rejects truncated or corrupt RGB blocks", () => {
++  assert.throws(() => codec.endorfyDecodeLighting(captured.slice(0,8)), /truncated/i);
++  for (const offset of [1,6,7,8]) {
++    const data = captured.slice(); data[offset]! ^= 1;
++    assert.throws(() => codec.endorfyDecodeLighting(data), /corrupt/i);
++  }
++});
++
++test("rejects valid-checksum RGB blocks with unsupported fields", () => {
++  for (const [offset, value] of [[0,7],[4,10],[5,10],[7,2]]) {
++    const data = captured.slice(); data[offset!] = value!;
++    data[6] = (0x55-data.slice(0,6).reduce((sum,byte)=>sum+byte,0))&255;
++    data[8] = (0x55-data[7]!)&255;
++    assert.throws(() => codec.endorfyDecodeLighting(data), /unsupported/i);
++  }
++});
++
++test("refuses unsupported effects, malformed colors, and unrepresentable levels", () => {
++  const base = {mode:"Static",color:"#123456",speed:4,brightness:60} as const;
++  for (const patch of [
++    {mode:"Spectrum"}, {mode:null}, {color:null}, {color:"#abc"}, {color:"#gg0000"},
++    {speed:0}, {speed:11}, {speed:1.5}, {speed:NaN},
++    {brightness:0}, {brightness:101}, {brightness:55}, {brightness:NaN},
++  ]) assert.throws(() => codec.endorfyEncodeLighting({...base,...patch} as never));
++});
 diff --git a/src/index.ts b/src/index.ts
 index aff8ad5..9d360d5 100644
 --- a/src/index.ts

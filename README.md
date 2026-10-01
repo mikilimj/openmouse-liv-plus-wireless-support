@@ -185,8 +185,8 @@ test a different driver build again.
 
 This fork includes Endorfy LIV Plus Wireless support through a packaged
 `@openmouse/protocol` snapshot, with 0–20 ms debounce, DPI, polling rate,
-battery and firmware reads over the `3299:00a7` receiver. Its mouse artwork
-is served locally. See [vendor/README.md](vendor/README.md) for the source
+RGB light-strip controls, battery and firmware reads over the `3299:00a7`
+receiver. Its mouse artwork is served locally. See [vendor/README.md](vendor/README.md) for the source
 patch, hardware evidence and package-refresh steps. A normal `npm ci` uses
 this snapshot, so a fresh checkout has the same driver.
 

@@ -9,6 +9,11 @@ The source patch includes the Endorfy codec, driver, discovery entries,
 automated tests and hardware notes. Its local package version is `0.1.0`;
 this is a fork snapshot, not an npm release.
 
+The driver exposes RGB light-strip effects, color, ten brightness levels and
+ten speed levels through the shared Lighting panel. Every lighting write is
+read back and checked; it preserves neighboring DPI and debounce settings.
+The hardware notes include the vendor-software evidence and receiver results.
+
 `endorfy-testing.md` records the tested receiver and write/read-back results.
 Only the `3299:00a7` 2.4 GHz receiver is enabled. The source stays in the
 external protocol library; the app uses its existing controls.
