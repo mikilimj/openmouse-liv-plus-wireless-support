@@ -45,14 +45,13 @@ image file — it has nowhere to go. Instead:
 
 ## Licensing
 
-`endorfy-liv-plus-wireless.png` is the unmodified transparent top-view render
-from Endorfy's official LIV Plus Wireless software 1.0.0.4 (2025-03-14),
-`app/res/2Button/dev1.png` inside its installer. Source:
-<https://endorfy.com/cdn/shop/files/ENDORFY-LIV-Plus-Wireless-Software-2025-03-14.zip?v=10453208085035470114>.
+`endorfy-liv-plus-wireless.png` is the replacement top-view image supplied
+by the user on 2026-10-01 as
+`EY6A016-endorfy-liv-plus-wireless-06a-jpg.png`, copied without modification.
+It replaces the earlier render extracted from the official software.
 It is served locally through `LOCAL_OVERRIDES` so this fork displays the
 picture without maintainer access to R2. After an R2 upload, remove the local
-override and file. Vendor product artwork; redistribution terms have not
-been established, as with the vendor renders recorded below.
+override and file. Redistribution terms have not been established.
 
 Vendor product renders are usually copyrighted marketing assets, and this
 repository is public. Prefer artwork you made or can redistribute — a traced
