@@ -264,6 +264,20 @@ test("debounce is offered only by the families that store it", () => {
   })).debounce, false);
 });
 
+test("Endorfy offers debounce at zero without unsupported advanced controls", () => {
+  const status: Partial<MouseStatus> = {
+    brand: "Endorfy",
+    ui: { family: "endorfy-liv-plus", hideProcessingCard: true, hideSignalCard: true, hideSleepCard: true },
+    debounceMs: 0,
+  };
+  const has = cardAvailability(snapshot({ status }));
+  assert.equal(has.debounce, true);
+  assert.equal(has.signal, false);
+  assert.equal(has.sleep, false);
+  assert.equal(has.processing, false);
+  assert.equal(cardAvailability(snapshot({ status: { ...status, debounceMs: null } })).debounce, false);
+});
+
 test("low power needs the Razer capability, not merely a reported threshold", () => {
   // selectableValues treats an empty option list as unbounded, so a mouse that
   // reports a threshold without the Razer driver must not show the card.

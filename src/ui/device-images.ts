@@ -21,6 +21,7 @@
  */
 
 function resolveDeviceImageFilename(_device: HIDDevice | null | undefined, displayName = ""): string {
+  if (/\bliv\s+plus\s+wireless\b/i.test(displayName)) return "endorfy-liv-plus-wireless.png";
   // Lightspeed receivers are shared product IDs, so paired G502 X variants
   // must use the friendly name read from the mouse itself.
   if (/g502\s*x\s*plus/i.test(displayName)) return "logitech-g502-x-plus.png";
@@ -199,6 +200,7 @@ const LOCAL_OVERRIDES: Readonly<Record<string, string>> = {
   "attackshark-r2.png": "/devices/attackshark-r2.png",
   "delux-m800-mini.png": "/devices/delux-m800-mini.png",
   "ipi-float-88.png": "/devices/ipi-float-88.png",
+  "endorfy-liv-plus-wireless.png": "/devices/endorfy-liv-plus-wireless.png",
 };
 
 export function deviceImage(device: HIDDevice | null | undefined, displayName = ""): string {

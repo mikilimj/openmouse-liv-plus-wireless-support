@@ -1,0 +1,801 @@
+diff --git a/README.md b/README.md
+index 0074b69..12317ef 100644
+--- a/README.md
++++ b/README.md
+@@ -43,6 +43,7 @@ checklist.
+ | Corsair | `@openmouse/protocol/corsair` |
+ | Dareu | `@openmouse/protocol/dareu` |
+ | Delux M800 Mini / M600 Pro | `@openmouse/protocol/delux` |
++| Endorfy LIV Plus Wireless | `@openmouse/protocol/endorfy` |
+ | Endgame Gear OP1/XM2 8K | `@openmouse/protocol/endgame-gear-op1` |
+ | Endgame Gear wireless | `@openmouse/protocol/endgame-gear-we` |
+ | Fantech | `@openmouse/protocol/fantech` |
+diff --git a/docs/endorfy-testing.md b/docs/endorfy-testing.md
+new file mode 100644
+index 0000000..773c9fd
+--- /dev/null
++++ b/docs/endorfy-testing.md
+@@ -0,0 +1,91 @@
++# Endorfy LIV Plus Wireless (EY6A016)
++
++Hardware exercised on 2026-10-01: `3299:00a7`, product string
++`Compx LIV Plus Wireless 2.4 GHz`, mouse firmware `2.03`, on Linux hidraw.
++Only this receiver is registered. Wired USB, Bluetooth, and EY6A017 have not
++been exercised and have no speculative USB IDs or discovery entries.
++
++## Evidence
++
++The local receiver's interface 1 declares usage `ff02:0002`, report ID 8,
++16-byte input/output reports. Feature report 6 on `ff04:0002` is separate
++and is not used by the driver. Interfaces 0 and 2 are keyboard/mouse input
++collections and must not be claimed as the configuration channel.
++
++The report-8 framing, checksum, battery and flash read commands match the
++existing VGN/Pulsar codecs. All frames include report ID 8 in the additive
++checksum: the complete 17 bytes sum to `0x55` modulo 256. The driver imports
++these shared codecs rather than reproducing their packet construction.
++
++Selected real receiver replies below include the report ID:
++
++```text
++battery:  08 04 00 00 00 02 32 00 0f 11 00 00 00 00 00 00 f5
++firmware: 08 12 00 00 00 02 02 03 00 00 00 00 00 00 00 00 34
++flash 0:  08 08 00 00 00 0a 01 54 01 54 00 55 00 55 00 55 92
++flash 10: 08 08 00 00 0a 0a 01 54 08 08 00 45 07 07 00 47 32
++```
++
++These decode to 50% battery, 3857 mV, firmware 2.03, polling code 1
++(1000 Hz), one enabled DPI stage, active index 0, and stage 0 at 450 DPI.
++The user did not independently know their existing DPI setting; its numerical
++interpretation is based on the shared encoding and device read-back.
++
++Polling, enabled-stage count, and active index are scalar/checksum pairs
++at offsets 0, 2, and 4. DPI records start at 12 with four bytes per stage;
++X/Y low bytes and high-bit flags must match, and each record sums to 0x55.
++The driver rejects corrupt or unsupported settings instead of substituting
++plausible defaults. The conservative six-stage ceiling and 26000 DPI ceiling
++come from the vendor's published specification and factory presets:
++https://endorfy.com/en/products/liv-plus-wireless
++
++## Debounce evidence
++
++The official LIV Plus Wireless software 1.0.0.4 (2025-03-14) lists every
++integer from 0 through 20 ms in `app/Language/0-English.xml`, `DebounceTime`.
++The archive is linked from https://endorfy.com/en/pages/software-2:
++https://endorfy.com/cdn/shop/files/ENDORFY-LIV-Plus-Wireless-Software-2025-03-14.zip?v=10453208085035470114
++
++The receiver initially returned `[00, 55]` at `0xa9`, the same debounce
++address used by the shared VGN/Pulsar flash layout. Writes to this pair were
++then confirmed on the real receiver. The driver validates the scalar checksum,
++refuses values outside 0–20 ms before I/O, and reads back each write before
++reporting success. It does not rewrite neighboring motion-sync settings.
++
++## Hardware results
++
++The production Endorfy client was exercised through a thin Python hidraw
++adapter implementing the same report calls as WebHID. Actual write commands
++were limited to polling bytes at offset 0, the active DPI record at 12,
++and the debounce scalar/checksum pair at offset `0xa9`.
++
++- DPI writes: 500, 800, 1600; every value read back correctly.
++- Polling writes: 125, 250, 500, 1000 Hz; every value read back correctly.
++- Debounce writes: 1, 4, 20, and 0 ms; every value read back correctly.
++- Original 0 ms debounce was restored and read back after close/open; DPI and
++  polling stayed unchanged throughout the debounce test.
++- Original 450 DPI and 1000 Hz settings were restored and read back.
++- The adapter additionally restored the original raw bytes on shutdown.
++
++The shared stage editing and active-stage selection have automated transport
++coverage; selecting a different enabled stage has not been tested on this
++unit, which currently has only one enabled stage. Stage-count changes,
++RGB, button remapping, profiles, processing, and firmware updates are not
++exposed. No persistence across a power cycle or browser/Bridge transport
++claim is made by the hidraw tests.
++
++## Remaining manual checks
++
++1. Connect through Chromium's picker or OpenMouse Bridge and verify the single
++   receiver card, name, battery, firmware, DPI, polling rate and debounce.
++2. Change DPI, polling rate and debounce through the UI, read back, and restore settings.
++3. Exercise sleep/wake and reconnect behavior.
++4. Validate other enabled DPI stages when present, including the upper DPI range.
++5. Test persistence after powering the mouse off and on.
++
++For Linux WebHID, grant access to all hidraw nodes of this product, then
++reload udev rules and unplug/reconnect the receiver:
++
++```udev
++SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3299", ATTRS{idProduct}=="00a7", TAG+="uaccess"
++```
+diff --git a/package.json b/package.json
+index eec295d..fa06cc2 100644
+--- a/package.json
++++ b/package.json
+@@ -17,6 +17,10 @@
+     "CONTRIBUTING.md"
+   ],
+   "exports": {
++    "./endorfy": {
++      "types": "./dist/endorfy/index.d.ts",
++      "import": "./dist/endorfy/index.js"
++    },
+     ".": {
+       "types": "./dist/index.d.ts",
+       "import": "./dist/index.js"
+diff --git a/src/drivers/endorfy/hid.test.ts b/src/drivers/endorfy/hid.test.ts
+new file mode 100644
+index 0000000..e5c6aa1
+--- /dev/null
++++ b/src/drivers/endorfy/hid.test.ts
+@@ -0,0 +1,279 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { createSupportedClient, deviceBrand, DEVICE_DRIVERS } from "../registry.ts";
++import { SUPPORTED_HID_FILTERS } from "../vendors.ts";
++
++const capturedFlash = new Uint8Array([
++  1,84,1,84,0,85,0,85,0,85,1,84,8,8,0,69,7,7,0,71,
++  19,19,0,47,29,29,0,27,39,39,0,7,59,59,0,223,59,59,0,223,59,59,0,223,
++]);
++function receiver(options: { ignoreWrites?: boolean; corruptField?: boolean; noisy?: boolean; silent?: boolean } = {}) {
++  const flash = new Uint8Array(0x100);
++  flash.set(capturedFlash);
++  flash.set([0, 85], 0xa9);
++  if (options.corruptField) flash[1] = 0;
++  const target = new EventTarget();
++  const sent: number[][] = [];
++  const report = { reportId: 8, items: [{ reportSize: 8, reportCount: 16 }] };
++  const device = Object.assign(target, {
++    vendorId: 0x3299, productId: 0x00a7, productName: "LIV Plus Wireless 2.4 GHz", opened: false,
++    collections: [{ usagePage: 0xff02, usage: 2, children: [], inputReports: [report], outputReports: [report], featureReports: [] }],
++    async open() { this.opened = true; },
++    async close() { this.opened = false; },
++    async sendReport(id: number, data: BufferSource) {
++      assert.equal(id, 8);
++      const request = new Uint8Array(data instanceof ArrayBuffer ? data : data.buffer, data instanceof ArrayBuffer ? 0 : data.byteOffset, data instanceof ArrayBuffer ? data.byteLength : data.byteLength);
++      assert.equal(request.length, 16);
++      assert.equal((8 + request.reduce((sum, byte) => sum + byte, 0)) & 255, 85);
++      sent.push([...request]);
++      if (options.silent) return;
++      const command = request[0]!;
++      const address = (request[2]! << 8) | request[3]!;
++      const length = request[4]!;
++      const reply = request.slice();
++      if (command === 4) {
++        reply.set([4,0,0,0,2,50,0,15,17,0,0,0,0,0,0,245]);
++      } else if (command === 0x12) {
++        reply.set([18,0,0,0,2,2,3,0,0,0,0,0,0,0,0,52]);
++      } else if (command === 8) {
++        reply.set(flash.slice(address, address + length), 5);
++      } else if (command === 7) {
++        if (!options.ignoreWrites) flash.set(request.slice(5, 5 + length), address);
++      } else {
++        throw new Error(`Unexpected command ${command}`);
++      }
++      reply[15] = (85 - 8 - reply.slice(0, 15).reduce((sum, value) => sum + value, 0)) & 255;
++      const emit = (body: Uint8Array) => {
++        const event = new Event("inputreport");
++        Object.assign(event, { reportId: 8, data: new DataView(body.buffer, body.byteOffset, body.byteLength) });
++        target.dispatchEvent(event);
++      };
++      queueMicrotask(() => {
++        if (options.noisy) {
++          emit(reply.slice(0, 5));
++          const bad = reply.slice(); bad[15] ^= 1; emit(bad);
++          if (command === 8 || command === 7) {
++            const stale = reply.slice(); stale[3] ^= 1;
++            stale[15] = (85 - 8 - stale.slice(0, 15).reduce((sum, value) => sum + value, 0)) & 255;
++            emit(stale);
++          }
++        }
++        emit(reply);
++      });
++    },
++  });
++  return { device: device as unknown as HIDDevice, flash, sent };
++}
++function client(device: HIDDevice) {
++  const result = createSupportedClient(device);
++  assert.ok(result, "Endorfy receiver should have a registered client");
++  return result;
++}
++
++test("discovers only the Endorfy configuration interface without driver overlap", () => {
++  const { device } = receiver();
++  assert.equal(deviceBrand(client(device)), "Endorfy");
++  assert.equal(DEVICE_DRIVERS.filter(driver => driver.supports(device)).length, 1);
++  assert.ok(SUPPORTED_HID_FILTERS.some(filter => filter.vendorId === 0x3299 && filter.productId === 0xa7 && filter.usagePage === 0xff02 && filter.usage === 2));
++  assert.equal(createSupportedClient({ ...device, collections: [] }), null);
++  assert.equal(createSupportedClient({ ...device, productId: 0xa8 }), null);
++  assert.equal(createSupportedClient({ ...device, collections: [{ ...device.collections[0]!, outputReports: [] }] }), null);
++});
++
++test("reads the captured battery, firmware, DPI and polling settings", async () => {
++  const { device, sent } = receiver({ noisy: true });
++  const c = client(device);
++  try {
++    const status = await c.readStatus();
++    assert.equal(status.brand, "Endorfy");
++    assert.equal(status.name, "Endorfy LIV Plus Wireless");
++    assert.equal(status.batteryPercent, 50);
++    assert.equal(status.batteryVoltageMv, 3857);
++    assert.equal(status.batteryState, "Discharging");
++    assert.deepEqual(status.firmware, ["Mouse 2.03"]);
++    assert.equal(status.dpi, 450);
++    assert.equal(status.pollingRateHz, 1000);
++    assert.deepEqual(status.dpiStages, [450]);
++    assert.deepEqual(status.supportedPollingRates, [125,250,500,1000]);
++    assert.equal(status.ui?.family, "endorfy-liv-plus");
++    assert.ok(sent.every(packet => packet[0] !== 7), "status must never write settings");
++  } finally { await c.close(); }
++});
++
++test("rejects corrupt settings instead of substituting a default", async () => {
++  const c = client(receiver({ corruptField: true }).device);
++  try { await assert.rejects(c.readStatus(), /corrupt/i); } finally { await c.close(); }
++});
++
++test("writes DPI with read-back confirmation and serializes whole operations", async () => {
++  const { device, flash } = receiver();
++  const c = client(device);
++  try {
++    assert.deepEqual(await Promise.all([c.setDpi(500), c.setDpi(550)]), [500,550]);
++    assert.deepEqual([...flash.slice(12,16)], [10,10,0,65]);
++    assert.equal((await c.readStatus()).dpi, 550);
++    await assert.rejects(c.setDpi(0));
++    await assert.rejects(c.setDpi(501));
++    await assert.rejects(c.setDpi(26050));
++  } finally { await c.close(); }
++});
++
++test("writes only supported polling rates and verifies the device accepted them", async () => {
++  const { device, flash } = receiver();
++  const c = client(device);
++  try {
++    assert.equal(await c.setPollingRate(500), 500);
++    assert.deepEqual([...flash.slice(0,2)], [2,83]);
++    await assert.rejects(c.setPollingRate(8000));
++  } finally { await c.close(); }
++});
++
++test("reports a failed write when the device retains its previous setting", async () => {
++  const c = client(receiver({ ignoreWrites: true }).device);
++  try {
++    await assert.rejects(c.setDpi(500), /retain|kept|confirm/i);
++    await assert.rejects(c.setPollingRate(500), /retain|kept|confirm/i);
++  } finally { await c.close(); }
++});
++
++test("closing the client cancels a pending read", async () => {
++  const c = client(receiver({ silent: true }).device);
++  const pending = c.readStatus();
++  await new Promise(resolve => setTimeout(resolve, 5));
++  await c.close();
++  await assert.rejects(pending, /closed/i);
++});
++
++test("edits only an enabled stage and verifies stage selection", async () => {
++  const { device, flash, sent } = receiver();
++  flash[2] = 2; flash[3] = 83;
++  const c = client(device) as import("./hid.ts").EndorfyLivPlusHidClient;
++  try {
++    assert.equal(await c.setDpiStageValue(1, 800), 800);
++    assert.deepEqual([...flash.slice(16,20)], [15,15,0,55]);
++    assert.deepEqual([...flash.slice(12,16)], [8,8,0,69]);
++    assert.equal(await c.setActiveDpiStage(1), 1);
++    assert.equal((await c.readStatus()).dpi, 800);
++    const writes = sent.filter(packet => packet[0] === 7).length;
++    await assert.rejects(c.setDpiStageValue(2, 800), /stage/i);
++    await assert.rejects(c.setActiveDpiStage(-1), /stage/i);
++    assert.equal(sent.filter(packet => packet[0] === 7).length, writes);
++  } finally { await c.close(); }
++});
++
++test("close releases a handle whose opening has not yet finished", async () => {
++  const { device } = receiver();
++  let finishOpening!: () => void;
++  const opening = new Promise<void>(resolve => { finishOpening = resolve; });
++  device.open = async () => { await opening; Object.assign(device, { opened: true }); };
++  const c = client(device);
++  const pending = c.open();
++  const rejected = assert.rejects(pending, /closed/i);
++  const closing = c.close();
++  finishOpening();
++  await closing;
++  await rejected;
++  assert.equal(device.opened, false);
++});
++
++test("reopening cannot revive writes queued before closing", async () => {
++  const { device, sent } = receiver({ silent: true });
++  const c = client(device);
++  const pendingRead = c.readStatus();
++  const rejectedRead = assert.rejects(pendingRead, /closed/i);
++  const pendingWrite = c.setPollingRate(500);
++  const rejectedWrite = assert.rejects(pendingWrite, /closed/i);
++  await new Promise(resolve => setTimeout(resolve, 5));
++  await c.close();
++  await c.open();
++  await rejectedRead;
++  await rejectedWrite;
++  assert.ok(sent.every(packet => packet[0] !== 7), "pre-close writes must stay cancelled");
++  await c.close();
++});
++
++test("a late send failure cannot cancel the next connection's read", async () => {
++  const { device } = receiver();
++  const send = device.sendReport.bind(device);
++  let rejectOld!: (error: Error) => void;
++  let releaseNew!: () => void;
++  let readyOld!: () => void;
++  let readyNew!: () => void;
++  const oldReady = new Promise<void>(resolve => { readyOld = resolve; });
++  const newReady = new Promise<void>(resolve => { readyNew = resolve; });
++  let sends = 0;
++  device.sendReport = async (id, body) => {
++    sends++;
++    if (sends === 1) {
++      return new Promise<void>((_resolve, reject) => { rejectOld = reject; readyOld(); });
++    }
++    if (sends === 2) {
++      await new Promise<void>(resolve => { releaseNew = resolve; readyNew(); });
++    }
++    await send(id, body);
++  };
++  const c = client(device);
++  const oldRead = c.readStatus();
++  const oldRejected = assert.rejects(oldRead, /closed/);
++  await oldReady;
++  await c.close();
++  await c.open();
++  const newRead = c.readStatus();
++  const outcome = newRead.then(status => ({ status, error: null }), error => ({ status: null, error }));
++  await newReady;
++  rejectOld(new Error("old send failed"));
++  await new Promise(resolve => setTimeout(resolve, 0));
++  releaseNew();
++  try {
++    await oldRejected;
++    const result = await outcome;
++    assert.equal(result.error, null);
++    assert.equal(result.status?.dpi, 450);
++  } finally { await c.close(); }
++});
++
++
++test("reads Endorfy's zero debounce and publishes the vendor's 0–20 ms options", async () => {
++  const { device } = receiver();
++  const c = client(device) as import("./hid.ts").EndorfyLivPlusHidClient;
++  try {
++    assert.equal((await c.readStatus()).debounceMs, 0);
++    assert.deepEqual(c.getDebounceOptions(), Array.from({ length: 21 }, (_, ms) => ms));
++    assert.equal(c.getDebounceMaxMs(), 20);
++  } finally { await c.close(); }
++});
++
++test("sets debounce with its scalar checksum, confirms it, and leaves adjacent settings untouched", async () => {
++  const { device, flash } = receiver();
++  flash.set([1, 84], 0xab);
++  const before = flash.slice();
++  const c = client(device) as import("./hid.ts").EndorfyLivPlusHidClient;
++  try {
++    for (const ms of [1, 4, 20, 0]) {
++      assert.equal(await c.setDebounceTime(ms), ms);
++      assert.equal((await c.readStatus()).debounceMs, ms);
++      assert.deepEqual([...flash.slice(0xa9, 0xab)], [ms, (85 - ms) & 255]);
++    }
++    assert.deepEqual(flash, before);
++  } finally { await c.close(); }
++});
++
++test("rejects invalid debounce before I/O and reports a refused write", async () => {
++  const { device, sent } = receiver({ ignoreWrites: true });
++  const c = client(device) as import("./hid.ts").EndorfyLivPlusHidClient;
++  try {
++    for (const ms of [-1, 21, 1.5, NaN, Infinity]) await assert.rejects(c.setDebounceTime(ms), /0.*20/);
++    assert.equal(sent.length, 0);
++    await assert.rejects(c.setDebounceTime(4), /kept|retain/);
++  } finally { await c.close(); }
++});
++
++test("rejects corrupt or unsupported debounce rather than showing a default", async () => {
++  for (const data of [[4, 0], [21, 64]]) {
++    const { device, flash } = receiver();
++    flash.set(data, 0xa9);
++    const c = client(device);
++    try { await assert.rejects(c.readStatus(), /debounce/i); }
++    finally { await c.close(); }
++  }
++});
+diff --git a/src/drivers/endorfy/hid.ts b/src/drivers/endorfy/hid.ts
+new file mode 100644
+index 0000000..013d764
+--- /dev/null
++++ b/src/drivers/endorfy/hid.ts
+@@ -0,0 +1,245 @@
++import type { MouseStatus } from "../mouse-types.js";
++import {
++  ENDORFY_VENDOR_ID, ENDORFY_LIV_PLUS_RECEIVER_PID, ENDORFY_REPORT_ID,
++  ENDORFY_PACKET_LENGTH, ENDORFY_USAGE_PAGE, ENDORFY_USAGE,
++  ENDORFY_POLLING_RATES, ENDORFY_MAX_STAGES, endorfyDecodeSettingsHeader, endorfyDecodeDpiStage,
++} from "../../endorfy/index.js";
++import {
++  vgnBuildReadPayload, vgnBuildSimplePayload, vgnBuildWritePayload,
++  vgnBuildWriteScalarPayload, vgnEncodeDpi, vgnEncodePollingRate,
++  vgnParseBattery, vgnParseReadResponse, vgnReportChecksumIsValid, vgnUnpackScalar, VGN_ADDRESS,
++} from "../../vgn/index.js";
++
++/** Only the report-8 channel and settings exercised on EY6A016 are exposed. */
++export class EndorfyLivPlusHidClient {
++  readonly device: HIDDevice;
++  readonly pollIntervalMs = 10_000;
++  private queue: Promise<unknown> = Promise.resolve();
++  private closed = false;
++  private opening: Promise<void> | null = null;
++  private closing: Promise<void> | null = null;
++  private generation = 0;
++  private operationGeneration: number | null = null;
++  private waiter: {
++    request: Uint8Array;
++    resolve: (body: Uint8Array) => void;
++    reject: (error: Error) => void;
++    timer: ReturnType<typeof setTimeout>;
++  } | null = null;
++
++  constructor(device: HIDDevice) { this.device = device; }
++
++  static isSupported(device: HIDDevice): boolean {
++    if (device.vendorId !== ENDORFY_VENDOR_ID || device.productId !== ENDORFY_LIV_PLUS_RECEIVER_PID) return false;
++    const hasReport = (reports: readonly HIDReportInfo[]) => reports.some(report => report.reportId === ENDORFY_REPORT_ID
++      && report.items.reduce((bits, item) => bits + item.reportSize * item.reportCount, 0) === ENDORFY_PACKET_LENGTH * 8);
++    return device.collections.some(collection => collection.usagePage === ENDORFY_USAGE_PAGE
++      && collection.usage === ENDORFY_USAGE && hasReport(collection.inputReports) && hasReport(collection.outputReports));
++  }
++
++  displayName(): string { return "Endorfy LIV Plus Wireless"; }
++  getDpiOptions(): number[] { return Array.from({ length: 520 }, (_, index) => (index + 1) * 50); }
++  getSupportedPollingRates(): number[] { return [...ENDORFY_POLLING_RATES]; }
++  getDebounceMaxMs(): number { return 20; }
++  getDebounceOptions(): number[] { return Array.from({ length: this.getDebounceMaxMs() + 1 }, (_, ms) => ms); }
++
++  async open(): Promise<void> {
++    if (this.closing) await this.closing;
++    this.closed = false;
++    await this.ensureOpen(this.generation);
++  }
++
++  private assertCurrent(generation: number): void {
++    if (this.closed || generation !== this.generation) throw new Error("The Endorfy connection was closed.");
++  }
++
++  private async ensureOpen(generation: number): Promise<void> {
++    this.assertCurrent(generation);
++    if (!this.device.opened) {
++      const opening = this.opening ?? this.device.open();
++      this.opening = opening;
++      try { await opening; }
++      finally { if (this.opening === opening) this.opening = null; }
++    }
++    this.assertCurrent(generation);
++    this.device.removeEventListener("inputreport", this.onInputReport);
++    this.device.addEventListener("inputreport", this.onInputReport);
++  }
++
++  async close(): Promise<void> {
++    if (this.closing) return this.closing;
++    this.generation++;
++    this.closed = true;
++    this.failWaiter(new Error("The Endorfy connection was closed."));
++    this.device.removeEventListener("inputreport", this.onInputReport);
++    const closing = (async () => {
++      await this.opening?.catch(() => undefined);
++      if (this.device.opened) await this.device.close();
++    })();
++    this.closing = closing;
++    try { await closing; }
++    finally { if (this.closing === closing) this.closing = null; }
++  }
++
++  async readStatus(): Promise<MouseStatus> {
++    return this.transaction(async () => {
++      const battery = vgnParseBattery(await this.exchange(vgnBuildSimplePayload(4)));
++      const firmware = await this.exchange(vgnBuildSimplePayload(0x12));
++      if (firmware[4]! < 2) throw new Error("Truncated Endorfy firmware reply.");
++      const settings = await this.settings();
++      const debounceMs = await this.readDebounce();
++      return {
++        brand: "Endorfy", name: this.displayName(),
++        batteryPercent: battery?.percent ?? null,
++        batteryVoltageMv: battery?.voltageMv ?? null,
++        batteryState: battery ? battery.charging ? (battery.percent >= 99 ? "Full" : "Charging") : "Discharging" : "Unknown",
++        dpi: settings.stages[settings.activeStage]!, dpiStages: settings.stages, activeDpiStage: settings.activeStage,
++        pollingRateHz: settings.pollingRateHz, supportedPollingRates: this.getSupportedPollingRates(),
++        activeProfile: null, connectionType: "Wireless", connectionDetail: "2.4 GHz receiver",
++        liftOffDistance: null, debounceMs,
++        firmware: [`Mouse ${firmware[5]}.${firmware[6]!.toString(16).padStart(2, "0")}`],
++        ui: {
++          family: "endorfy-liv-plus", defaultDisplayName: this.displayName(), forceShowBattery: true,
++          hideUnsupportedPollingRates: true, hideProcessingCard: true, hideSignalCard: true, hideSleepCard: true,
++          dpiStageEditor: { maxStages: ENDORFY_MAX_STAGES, countEditable: false, minDpi: 50, maxDpi: 26000, stepDpi: 50 },
++        },
++      };
++    });
++  }
++
++  async setDpi(dpi: number): Promise<number> {
++    const data = vgnEncodeDpi(dpi); // Validate before any I/O.
++    return this.transaction(async () => {
++      const settings = await this.settings();
++      return this.writeStage(settings.activeStage, dpi, data);
++    });
++  }
++
++  async setDpiStageValue(stage: number, dpi: number): Promise<number> {
++    const data = vgnEncodeDpi(dpi);
++    return this.transaction(async () => {
++      const settings = await this.settings();
++      this.validateStage(stage, settings.stageCount);
++      return this.writeStage(stage, dpi, data);
++    });
++  }
++
++  async setActiveDpiStage(stage: number): Promise<number> {
++    return this.transaction(async () => {
++      const settings = await this.settings();
++      this.validateStage(stage, settings.stageCount);
++      await this.exchange(vgnBuildWriteScalarPayload(4, stage));
++      const confirmed = endorfyDecodeSettingsHeader(await this.read(0, 6));
++      if (confirmed.activeStage !== stage) throw new Error("The Endorfy mouse did not retain the selected DPI stage.");
++      return stage;
++    });
++  }
++
++  async setPollingRate(rate: number): Promise<number> {
++    if (!ENDORFY_POLLING_RATES.includes(rate)) throw new Error("Endorfy polling rate must be 125, 250, 500, or 1000 Hz.");
++    return this.transaction(async () => {
++      await this.exchange(vgnBuildWriteScalarPayload(0, vgnEncodePollingRate(rate)));
++      const confirmed = endorfyDecodeSettingsHeader(await this.read(0, 6));
++      if (confirmed.pollingRateHz !== rate) throw new Error(`The Endorfy mouse kept ${confirmed.pollingRateHz} Hz instead of ${rate} Hz.`);
++      return rate;
++    });
++  }
++
++  async setDebounceTime(ms: number): Promise<number> {
++    if (!Number.isInteger(ms) || ms < 0 || ms > this.getDebounceMaxMs()) throw new Error("Endorfy debounce must be 0–20 ms.");
++    return this.transaction(async () => {
++      await this.exchange(vgnBuildWriteScalarPayload(VGN_ADDRESS.debounce, ms));
++      const confirmed = await this.readDebounce();
++      if (confirmed !== ms) throw new Error(`The Endorfy mouse kept ${confirmed} ms instead of ${ms} ms debounce.`);
++      return confirmed;
++    });
++  }
++
++  private async readDebounce(): Promise<number> {
++    const data = await this.read(VGN_ADDRESS.debounce, 2);
++    const ms = vgnUnpackScalar(data[0]!, data[1]!);
++    if (ms === null) throw new Error("The Endorfy mouse returned corrupt debounce settings.");
++    if (ms > this.getDebounceMaxMs()) throw new Error("The Endorfy mouse returned unsupported debounce settings.");
++    return ms;
++  }
++
++  private validateStage(stage: number, count: number): void {
++    if (!Number.isInteger(stage) || stage < 0 || stage >= count) throw new Error("Invalid Endorfy DPI stage.");
++  }
++
++  private async writeStage(stage: number, dpi: number, data: Uint8Array): Promise<number> {
++    const address = 12 + stage * 4;
++    await this.exchange(vgnBuildWritePayload(address, [...data]));
++    const confirmed = endorfyDecodeDpiStage(await this.read(address, 4));
++    if (confirmed !== dpi) throw new Error(`The Endorfy mouse kept ${confirmed} DPI instead of ${dpi} DPI.`);
++    return confirmed;
++  }
++
++  private async settings() {
++    const header = endorfyDecodeSettingsHeader(await this.read(0, 6));
++    const stages: number[] = [];
++    for (let stage = 0; stage < header.stageCount; stage++) {
++      stages.push(endorfyDecodeDpiStage(await this.read(12 + stage * 4, 4)));
++    }
++    return { ...header, stages };
++  }
++
++  private async read(address: number, length: number): Promise<Uint8Array> {
++    const reply = await this.exchange(vgnBuildReadPayload(address, length));
++    const data = vgnParseReadResponse(reply, address, length);
++    if (!data) throw new Error(`Invalid Endorfy settings reply at ${address}.`);
++    return data;
++  }
++
++  private transaction<T>(action: () => Promise<T>): Promise<T> {
++    const generation = this.generation;
++    const result = this.queue.then(async () => {
++      this.assertCurrent(generation);
++      this.operationGeneration = generation;
++      try { return await action(); }
++      finally { this.operationGeneration = null; }
++    });
++    this.queue = result.catch(() => undefined);
++    return result;
++  }
++
++  private readonly onInputReport = (event: HIDInputReportEvent): void => {
++    if (event.reportId !== ENDORFY_REPORT_ID || !this.waiter) return;
++    const body = new Uint8Array(event.data.buffer, event.data.byteOffset, event.data.byteLength);
++    const request = this.waiter.request;
++    if (!vgnReportChecksumIsValid(body) || body[0] !== request[0]) return;
++    if ((request[0] === 7 || request[0] === 8) && (body[2] !== request[2] || body[3] !== request[3])) return;
++    if (body[1] !== 0) { this.failWaiter(new Error(`Endorfy command ${request[0]} failed with status ${body[1]}.`)); return; }
++    if (request[0] === 8 && body[4] !== request[4]) return;
++    const waiter = this.waiter;
++    this.waiter = null;
++    clearTimeout(waiter.timer);
++    waiter.resolve(body.slice());
++  };
++
++  private failWaiter(error: Error, expected = this.waiter): void {
++    const waiter = this.waiter;
++    if (!waiter || waiter !== expected) return;
++    this.waiter = null;
++    clearTimeout(waiter.timer);
++    waiter.reject(error);
++  }
++
++  private async exchange(request: Uint8Array): Promise<Uint8Array> {
++    const generation = this.operationGeneration ?? this.generation;
++    await this.ensureOpen(generation);
++    this.assertCurrent(generation);
++    const response = new Promise<Uint8Array>((resolve, reject) => {
++      const timer = setTimeout(() => this.failWaiter(new Error(`Timed out waiting for Endorfy command ${request[0]}.`), waiter), 1000);
++      this.waiter = { request, resolve, reject, timer };
++    });
++    const waiter = this.waiter;
++    this.device.sendReport(ENDORFY_REPORT_ID, new Uint8Array(request).buffer)
++      .catch(error => this.failWaiter(error instanceof Error ? error : new Error(String(error)), waiter));
++    const reply = await response;
++    // Receiver flash accesses need a little spacing; keep it inside the transaction.
++    await new Promise(resolve => setTimeout(resolve, 10));
++    this.assertCurrent(generation);
++    return reply;
++  }
++}
+diff --git a/src/drivers/endorfy/protocol.test.ts b/src/drivers/endorfy/protocol.test.ts
+new file mode 100644
+index 0000000..1876b5d
+--- /dev/null
++++ b/src/drivers/endorfy/protocol.test.ts
+@@ -0,0 +1,20 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { endorfyDecodeDpiStage, endorfyDecodeSettingsHeader } from "../../endorfy/index.ts";
++
++test("decodes the upper DPI range using both high bits", () => {
++  assert.equal(endorfyDecodeDpiStage(new Uint8Array([7,7,136,191])), 26000);
++  assert.equal(endorfyDecodeDpiStage(new Uint8Array([0,0,68,17])), 12850);
++});
++
++test("rejects inconsistent axes, unsupported flags and damaged stage checksums", () => {
++  for (const packet of [[8,7,0,70], [8,8,1,68], [8,8,4,65], [8,8,0,0], [8,8,0]]) {
++    assert.throws(() => endorfyDecodeDpiStage(new Uint8Array(packet)), /corrupt/);
++  }
++});
++
++test("rejects invalid counts, active stages, rates and truncated settings", () => {
++  for (const header of [[1,84,0,85,0,85], [1,84,7,78,0,85], [1,84,1,84,1,84], [64,21,1,84,0,85], [1,84]]) {
++    assert.throws(() => endorfyDecodeSettingsHeader(new Uint8Array(header)));
++  }
++});
+diff --git a/src/drivers/mouse-types.ts b/src/drivers/mouse-types.ts
+index 5838179..bdcb01e 100644
+--- a/src/drivers/mouse-types.ts
++++ b/src/drivers/mouse-types.ts
+@@ -153,7 +153,7 @@ export interface AtkReceiverInfo {
+ }
+ 
+ export interface MouseStatus {
+-  brand: "RAWM" | "Motospeed" | "Logitech" | "Pulsar" | "Endgame Gear" | "WLMouse" | "G-Wolves" | "Lamzu" | "CRDRAKO" | "Attack Shark" | "Orbital" | "Razer" | "Teevolution" | "ATK" | "VXE" | "VGN" | "VAXEE" | "Finalmouse" | "Keychron" | "moddoMOUSE" | "Ninjutso" | "Zaunkoenig" | "Fantech" | "Wooting" | "WALLHACK" | "SteelSeries" | "Glorious" | "MCHOSE" | "K-snake" | "Noir Gear" | "Lingbao" | "GearHub" | "Corsair" | "Microsoft" | "Dareu" | "Redragon" | "Incott" | "HyperX" | "ASUS" | "Ryunix" | "Delux" | "GravaStar" | "IPI" | "Rapoo";
++  brand: "Endorfy" | "RAWM" | "Motospeed" | "Logitech" | "Pulsar" | "Endgame Gear" | "WLMouse" | "G-Wolves" | "Lamzu" | "CRDRAKO" | "Attack Shark" | "Orbital" | "Razer" | "Teevolution" | "ATK" | "VXE" | "VGN" | "VAXEE" | "Finalmouse" | "Keychron" | "moddoMOUSE" | "Ninjutso" | "Zaunkoenig" | "Fantech" | "Wooting" | "WALLHACK" | "SteelSeries" | "Glorious" | "MCHOSE" | "K-snake" | "Noir Gear" | "Lingbao" | "GearHub" | "Corsair" | "Microsoft" | "Dareu" | "Redragon" | "Incott" | "HyperX" | "ASUS" | "Ryunix" | "Delux" | "GravaStar" | "IPI" | "Rapoo";
+   name: string;
+   /** Driver-supplied UI policy (optional; keeps control.ts brand-agnostic). */
+   ui?: MouseUiHints;
+diff --git a/src/drivers/registry.ts b/src/drivers/registry.ts
+index 74d92d4..3319b2c 100644
+--- a/src/drivers/registry.ts
++++ b/src/drivers/registry.ts
+@@ -1,3 +1,4 @@
++import { EndorfyLivPlusHidClient } from "./endorfy/hid.js";
+ import { AsusHidClient } from "./asus/hid.ts";
+ import { AtkBitmouseHidClient } from "./atk/bitmouse-hid.ts";
+ import { AtkHidClient } from "./atk/hid.ts";
+@@ -72,7 +73,7 @@ import { BytechHidClient } from "./bytech/hid.ts";
+ import { RapooHidClient } from "./rapoo/hid.ts";
+ 
+ export type PulsarClient = PulsarHidClient | PulsarProHidClient | PulsarXs1HidClient;
+-export type SupportedClient = RawmHidClient | MotospeedHidClient | LogitechHidppClient | PulsarClient | EggOp1HidClient | EggWeHidClient | FinalmouseHidClient | WLMouseHidClient | WLMouseBeastX4kHidClient | LamzuHidClient | LamzuAtlantisHidClient | OrbitalHidClient | RazerHidClient | RazerViperHidClient | RazerViperMiniHidClient | RazerViperV4ProHidClient | RazerCobraHidClient | TeevolutionHidClient | AtkHidClient | AtkBitmouseHidClient | VgnF2HidClient | VaxeeHidClient | Keychron8kHidClient | Keychron1kHidClient | Keychron4kHidClient | Keychron8kNordicHidClient | KeychronNapeHidClient | ModdoHidClient | NinjutsoHidClient | ZaunkoenigHidClient | CorsairHidClient | AttackSharkHidClient | FantechHidClient | GearHubHidClient | WootingHidClient | WallhackMouseHidClient | WallhackKeyboardHidClient | GWolvesHidClient | GWolvesXviHidClient | SteelSeriesRival3HidClient | SteelSeriesAerox3HidClient | SteelSeriesRival3WirelessHidClient | SteelSeriesAerox5HidClient | SteelSeriesAerox5WirelessHidClient | SteelSeriesRival650HidClient | SteelSeriesAerox9WirelessHidClient | SteelSeriesRival310HidClient | SteelSeriesPrimePlusHidClient | SteelSeriesPrimeMiniWirelessHidClient | SteelSeriesSenseiTenHidClient | GloriousHidClient | GloriousClassicHidClient | MchoseHidClient | MchoseDockHidClient | MchoseA5ProMaxHidClient | KsnakeHidClient | MicrosoftHidClient | DareuHidClient | RedragonHidClient | IncottHidClient | HyperXHidClient | MchoseV3HidClient | AsusHidClient | KyuProMx1Client | DeluxHidClient | BytechHidClient | RapooHidClient;
++export type SupportedClient = EndorfyLivPlusHidClient | RawmHidClient | MotospeedHidClient | LogitechHidppClient | PulsarClient | EggOp1HidClient | EggWeHidClient | FinalmouseHidClient | WLMouseHidClient | WLMouseBeastX4kHidClient | LamzuHidClient | LamzuAtlantisHidClient | OrbitalHidClient | RazerHidClient | RazerViperHidClient | RazerViperMiniHidClient | RazerViperV4ProHidClient | RazerCobraHidClient | TeevolutionHidClient | AtkHidClient | AtkBitmouseHidClient | VgnF2HidClient | VaxeeHidClient | Keychron8kHidClient | Keychron1kHidClient | Keychron4kHidClient | Keychron8kNordicHidClient | KeychronNapeHidClient | ModdoHidClient | NinjutsoHidClient | ZaunkoenigHidClient | CorsairHidClient | AttackSharkHidClient | FantechHidClient | GearHubHidClient | WootingHidClient | WallhackMouseHidClient | WallhackKeyboardHidClient | GWolvesHidClient | GWolvesXviHidClient | SteelSeriesRival3HidClient | SteelSeriesAerox3HidClient | SteelSeriesRival3WirelessHidClient | SteelSeriesAerox5HidClient | SteelSeriesAerox5WirelessHidClient | SteelSeriesRival650HidClient | SteelSeriesAerox9WirelessHidClient | SteelSeriesRival310HidClient | SteelSeriesPrimePlusHidClient | SteelSeriesPrimeMiniWirelessHidClient | SteelSeriesSenseiTenHidClient | GloriousHidClient | GloriousClassicHidClient | MchoseHidClient | MchoseDockHidClient | MchoseA5ProMaxHidClient | KsnakeHidClient | MicrosoftHidClient | DareuHidClient | RedragonHidClient | IncottHidClient | HyperXHidClient | MchoseV3HidClient | AsusHidClient | KyuProMx1Client | DeluxHidClient | BytechHidClient | RapooHidClient;
+ 
+ export interface DeviceDriver {
+   brand: string;
+@@ -82,6 +83,7 @@ export interface DeviceDriver {
+ }
+ 
+ export const DEVICE_DRIVERS: readonly DeviceDriver[] = [
++  { brand: "Endorfy", supports: EndorfyLivPlusHidClient.isSupported, create: device => new EndorfyLivPlusHidClient(device), score: () => 7 },
+   { brand: "IPI", supports: (device) => BytechHidClient.isSupported(device), create: (device) => new BytechHidClient(device), score: () => 9 },
+   {brand: "ASUS",supports: (device) => AsusHidClient.isSupported(device), create: (device) => new AsusHidClient(device), score: () => 10,},
+   { brand: "Dareu", supports: (device) => DareuHidClient.isSupported(device), create: (device) => new DareuHidClient(device), score: () => 9 },
+diff --git a/src/drivers/vendors.ts b/src/drivers/vendors.ts
+index 3969115..bf72d19 100644
+--- a/src/drivers/vendors.ts
++++ b/src/drivers/vendors.ts
+@@ -1,3 +1,4 @@
++import { ENDORFY_VENDOR_ID, ENDORFY_LIV_PLUS_RECEIVER_PID, ENDORFY_USAGE_PAGE, ENDORFY_USAGE } from "../endorfy/index.js";
+ import {
+   ASUS_PRODUCT_IDS,
+   ASUS_USAGE,
+@@ -113,6 +114,7 @@ import {
+ import { MOTOSPEED_PRODUCTS, MOTOSPEED_USAGE_PAGE, MOTOSPEED_VENDOR_ID } from "@openmouse/protocol/motospeed";
+ 
+ export const VENDOR_ID = {
++  endorfy: ENDORFY_VENDOR_ID,
+   vaxee: VAXEE_VENDOR_ID,
+   asus: ASUS_VENDOR_ID,
+   ryunix: RYUNIX_VENDOR_ID,
+@@ -717,6 +719,7 @@ export const VAXEE_HID_FILTERS: HIDDeviceFilter[] = VAXEE_PRODUCT_IDS.map((produ
+ }));
+ 
+ export const SUPPORTED_HID_FILTERS: HIDDeviceFilter[] = [
++  { vendorId: ENDORFY_VENDOR_ID, productId: ENDORFY_LIV_PLUS_RECEIVER_PID, usagePage: ENDORFY_USAGE_PAGE, usage: ENDORFY_USAGE },
+   ...VAXEE_HID_FILTERS,
+   ...ASUS_HID_FILTERS,
+   ...DAREU_HID_FILTERS,
+diff --git a/src/endorfy/index.ts b/src/endorfy/index.ts
+new file mode 100644
+index 0000000..26e9790
+--- /dev/null
++++ b/src/endorfy/index.ts
+@@ -0,0 +1,36 @@
++/** LIV Plus Wireless EY6A016, 2.4 GHz receiver. See docs/endorfy-testing.md. */
++import { vgnDecodeDpi, vgnDecodePollingRate, vgnUnpackScalar } from "../vgn/index.js";
++export const ENDORFY_VENDOR_ID = 0x3299;
++export const ENDORFY_LIV_PLUS_RECEIVER_PID = 0x00a7;
++export const ENDORFY_REPORT_ID = 8;
++export const ENDORFY_PACKET_LENGTH = 16;
++export const ENDORFY_USAGE_PAGE = 0xff02;
++export const ENDORFY_USAGE = 2;
++export const ENDORFY_POLLING_RATES: readonly number[] = [125, 250, 500, 1000];
++export const ENDORFY_MAX_STAGES = 6;
++
++export function endorfyDecodeSettingsHeader(data: Uint8Array) {
++  if (data.length !== 6) throw new Error("Truncated Endorfy settings header.");
++  const scalar = (offset: number): number => {
++    const value = vgnUnpackScalar(data[offset]!, data[offset + 1]!);
++    if (value === null) throw new Error("The Endorfy mouse returned corrupt settings.");
++    return value;
++  };
++  const pollingRateHz = vgnDecodePollingRate(scalar(0));
++  const stageCount = scalar(2);
++  const activeStage = scalar(4);
++  if (pollingRateHz === null || !ENDORFY_POLLING_RATES.includes(pollingRateHz)
++    || stageCount < 1 || stageCount > ENDORFY_MAX_STAGES || activeStage >= stageCount) {
++    throw new Error("The Endorfy mouse returned unsupported settings.");
++  }
++  return { pollingRateHz, stageCount, activeStage };
++}
++
++export function endorfyDecodeDpiStage(data: Uint8Array): number {
++  const dpi = vgnDecodeDpi(data);
++  if (data.length !== 4 || dpi === null || dpi > 26000
++    || (data[2]! & 0x33) !== 0 || ((data[2]! >> 6) & 3) !== ((data[2]! >> 2) & 3)) {
++    throw new Error("The Endorfy mouse returned a corrupt DPI stage.");
++  }
++  return dpi;
++}
+diff --git a/src/index.ts b/src/index.ts
+index aff8ad5..9d360d5 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,3 +1,4 @@
++export * as endorfy from "./endorfy/index.js";
+ export * as atk from "./atk/index.js";
+ export * as bitmouse from "./bitmouse/index.js";
+ export * as endgameGearWe from "./endgame-gear/wireless.js";

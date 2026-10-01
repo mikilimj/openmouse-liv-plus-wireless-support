@@ -110,6 +110,31 @@ library registry automatically.
 Hardware-specific validation checklists live in the protocol repository's
 `docs/` directory.
 
+### Testing a local protocol driver
+
+Keep `mouse-protocol` beside this repository. Build the library, then install
+the local package into OpenMouse without changing its manifest or lockfile:
+
+```bash
+cd ../mouse-protocol
+npm run check
+cd ../openmouse
+npm install --no-save --package-lock=false ../mouse-protocol
+npm run check
+npm run dev
+```
+
+Restart the development server after switching protocol builds. Running
+`npm ci` restores the manifest's dependency; repeat the local installation to
+test a different driver build again.
+
+This fork includes Endorfy LIV Plus Wireless support through a packaged
+`@openmouse/protocol` snapshot, with 0–20 ms debounce, DPI, polling rate,
+battery and firmware reads over the `3299:00a7` receiver. Its mouse artwork
+is served locally. See [vendor/README.md](vendor/README.md) for the source
+patch, hardware evidence and package-refresh steps. A normal `npm ci` uses
+this snapshot, so a fresh checkout has the same driver.
+
 ## License
 
 [GNU AGPL-3.0](LICENSE). Contributions are accepted under the same license.

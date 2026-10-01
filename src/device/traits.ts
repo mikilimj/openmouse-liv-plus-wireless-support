@@ -39,6 +39,7 @@ const BY_FAMILY: Readonly<Record<string, Partial<DriverTraits>>> = {
   pulsar: SHARED_ADVANCED,
   teevolution: { ...SHARED_ADVANCED, teevolution: true },
   vgn: SHARED_ADVANCED,
+  "endorfy-liv-plus": { advancedSection: true, debounce: true },
   wlmouse: DIRECT_MODE,
   lamzu: DIRECT_MODE,
   "attack-shark": DIRECT_MODE,

@@ -38,8 +38,9 @@ jobs:
           node <<'NODE'
           const { dependencies = {} } = require("./package.json");
           const protocolVersion = dependencies["@openmouse/protocol"];
-          if (!/^\d+\.\d+\.\d+$/.test(protocolVersion)) {
-            console.error("Protocol dependency must be an exact stable npm version.");
+          const bundledProtocol = "file:vendor/openmouse-protocol-endorfy.tgz";
+          if (!/^\d+\.\d+\.\d+$/.test(protocolVersion) && protocolVersion !== bundledProtocol) {
+            console.error("Protocol dependency must be an exact stable npm version or the bundled Endorfy snapshot.");
             process.exit(1);
           }
           const approved = {
